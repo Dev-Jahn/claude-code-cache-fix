@@ -1,5 +1,6 @@
 {
   "bootstrap-defense": { "enabled": true, "order": 45 },
+  "entrypoint-bridge": { "enabled": true, "order": 60 },
   "ttl-tier-detect": { "enabled": true, "order": 75 },
   "cc-version-normalize": { "enabled": true, "order": 90 },
   "fingerprint-strip": { "enabled": true, "order": 100 },

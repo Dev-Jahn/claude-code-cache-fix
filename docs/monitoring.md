@@ -133,3 +133,5 @@ Proxy mode uses extension configuration in `proxy/extensions.json`. These env va
 | `CACHE_FIX_MICROCOMPACT_SENTINEL_PREFIX_<N>` | unset | (proxy) Custom Mode B literal prefix(es). Pair with a custom Mode A pattern from a non-default sentinel family so prefix-only variants get redacted capture too. |
 | `CACHE_FIX_MICROCOMPACT_REDACT_LEN` | `64` | (proxy) Mode B prefix length in dump records. Set `0` to suppress prefix entirely. |
 | `CACHE_FIX_DUMP_MICROCOMPACT_INCLUDE_NORMALIZED` | unset | (proxy) Add post-normalization text alongside raw `sentinel_text` in dump records (`=1` enables). |
+| `CACHE_FIX_ENTRYPOINT_BRIDGE` | unset | (proxy) `=1` enables the entrypoint-bridge extension: persist the interactive (`cc_entrypoint=cli`) prefix shape and re-apply it to headless (`sdk-cli`) resume requests so `claude -p --resume` forks ride the interactive prompt cache. Opt-in — see CHANGELOG for the tool-redeclaration tradeoff. |
+| `CACHE_FIX_ENTRYPOINT_BRIDGE_MAX_AGE_MS` | `7200000` | (proxy) Snapshot freshness gate for entrypoint-bridge (2h default; snapshots older than this are never bridged and are swept after 48h). |
