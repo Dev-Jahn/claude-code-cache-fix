@@ -43,6 +43,7 @@ const sampleVars = {
   rejectUnauthorized: "",
   debug: "",
   caDir: "",
+  entrypointBridge: "",
   workingDir: "/opt/cache-fix",
   requires: "",
 };
@@ -231,6 +232,32 @@ test("renderLaunchdTemplate: includes CACHE_FIX_HOT_RELOAD=on when set", async (
   assert.ok(!out.includes("{{"));
 });
 
+test("renderSystemdTemplate: renders CACHE_FIX_ENTRYPOINT_BRIDGE=1 only when set", async () => {
+  const tpl = await readFile(join(TEMPLATE_DIR, "cache-fix-proxy.service.template"), "utf-8");
+  const enabled = renderSystemdTemplate(tpl, { ...sampleVars, entrypointBridge: "1" });
+  const disabled = renderSystemdTemplate(tpl, sampleVars);
+  assert.ok(enabled.includes("Environment=CACHE_FIX_ENTRYPOINT_BRIDGE=1"));
+  assert.ok(!disabled.includes("CACHE_FIX_ENTRYPOINT_BRIDGE"));
+});
+
+test("renderLaunchdTemplate: renders CACHE_FIX_ENTRYPOINT_BRIDGE=1 only when set", async () => {
+  const tpl = await readFile(
+    join(TEMPLATE_DIR, "com.cnighswonger.cache-fix-proxy.plist.template"),
+    "utf-8",
+  );
+  const enabled = renderLaunchdTemplate(tpl, {
+    ...sampleVars,
+    entrypointBridge: "1",
+    logDir: "/tmp/logs",
+  });
+  const disabled = renderLaunchdTemplate(tpl, { ...sampleVars, logDir: "/tmp/logs" });
+  assert.match(
+    enabled,
+    /<key>CACHE_FIX_ENTRYPOINT_BRIDGE<\/key>\n\s*<string>1<\/string>/,
+  );
+  assert.ok(!disabled.includes("CACHE_FIX_ENTRYPOINT_BRIDGE"));
+});
+
 // --- Port validation (shell-injection guard) ---
 
 test("validatePort: accepts valid numeric strings", () => {
@@ -341,6 +368,21 @@ test("getDefaults: captures CACHE_FIX_CA_DIR for managed services", () => {
   } finally {
     if (previous === undefined) delete process.env.CACHE_FIX_CA_DIR;
     else process.env.CACHE_FIX_CA_DIR = previous;
+  }
+});
+
+test("getDefaults: enables entrypoint bridge only for the literal value 1", () => {
+  const previous = process.env.CACHE_FIX_ENTRYPOINT_BRIDGE;
+  try {
+    for (const [value, expected] of [["1", "1"], ["on", ""], ["true", ""], ["0", ""]]) {
+      process.env.CACHE_FIX_ENTRYPOINT_BRIDGE = value;
+      assert.equal(getDefaults().entrypointBridge, expected, `value ${value}`);
+    }
+    delete process.env.CACHE_FIX_ENTRYPOINT_BRIDGE;
+    assert.equal(getDefaults().entrypointBridge, "");
+  } finally {
+    if (previous === undefined) delete process.env.CACHE_FIX_ENTRYPOINT_BRIDGE;
+    else process.env.CACHE_FIX_ENTRYPOINT_BRIDGE = previous;
   }
 });
 

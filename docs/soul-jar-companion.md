@@ -30,7 +30,8 @@ The installer:
    `npm ci --omit=dev` against this branch's tracked `package-lock.json`. npm's cache is
    kept inside the checkout at `.npm-cache`.
 2. Installs the repository's existing systemd user service and healthcheck timer, or
-   its launchd agent, with forward-proxy mode enabled.
+   its launchd agent, with forward-proxy mode and
+   `CACHE_FIX_ENTRYPOINT_BRIDGE=1` enabled.
 3. Waits for the proxy health endpoint and its local CA.
 4. Backs up and updates `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json` with
    `HTTPS_PROXY`, `https_proxy`, `NODE_EXTRA_CA_CERTS`, `NO_PROXY`, and `no_proxy`.
@@ -45,6 +46,8 @@ settings, no-proxy tokens, and soul-jar config line existed before the first ins
 uninstall can restore that ownership boundary. A second identical install creates no
 new settings backup and changes nothing outside the checkout. Git's `FETCH_HEAD` and
 reflog plus `.npm-cache` may still churn inside the installer-owned checkout.
+Re-running the installer also upgrades a managed service definition that predates the
+entrypoint bridge flag.
 
 The installer never sets or changes `ANTHROPIC_BASE_URL`. It stops before making any
 change if Claude settings already contain that key, if either `HTTPS_PROXY` or

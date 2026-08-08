@@ -79,6 +79,61 @@ async function runInstaller(fixture, args = []) {
   });
 }
 
+async function enableFixtureServices(fixture, kind) {
+  const launcherDir = join(fixture.checkout, "bin");
+  const serviceLog = join(fixture.root, "service-install.log");
+  const bashEnv = join(fixture.root, "fixture-commands.sh");
+  await mkdir(launcherDir, { recursive: true });
+  await writeFile(
+    join(launcherDir, "claude-via-proxy.mjs"),
+    `import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+const force = process.argv.includes("--force");
+const kind = process.env.SOUL_JAR_TEST_SERVICE_KIND;
+const path = kind === "launchd"
+  ? join(process.env.HOME, "Library", "LaunchAgents", "com.cnighswonger.cache-fix-proxy.plist")
+  : join(process.env.HOME, ".config", "systemd", "user", "cache-fix-proxy.service");
+appendFileSync(process.env.SOUL_JAR_TEST_SERVICE_LOG, force ? "force\\n" : "normal\\n");
+if (existsSync(path) && !force) {
+  process.stderr.write("[install-service] already-installed: " + path + "\\n");
+  process.exit(1);
+}
+mkdirSync(dirname(path), { recursive: true });
+const caDir = join(process.env.CLAUDE_CONFIG_DIR, "cache-fix-ca");
+const body = kind === "launchd"
+  ? "<key>CACHE_FIX_FORWARD_PROXY</key>\\n<string>on</string>\\n<key>CACHE_FIX_CA_DIR</key>\\n<string>" + caDir + "</string>\\n<key>CACHE_FIX_ENTRYPOINT_BRIDGE</key>\\n<string>1</string>\\n"
+  : "Environment=CACHE_FIX_FORWARD_PROXY=on\\nEnvironment=CACHE_FIX_CA_DIR=" + caDir + "\\nEnvironment=CACHE_FIX_ENTRYPOINT_BRIDGE=1\\n";
+writeFileSync(path, body);
+`,
+  );
+  await writeFile(
+    bashEnv,
+    `systemctl() { return 0; }
+launchctl() { return 0; }
+curl() { return 0; }
+uname() { printf '%s\\n' '${kind === "launchd" ? "Darwin" : "Linux"}'; }
+`,
+  );
+  delete fixture.env.SOUL_JAR_COMPANION_SKIP_SERVICE;
+  fixture.env.BASH_ENV = bashEnv;
+  fixture.env.SOUL_JAR_TEST_SERVICE_KIND = kind;
+  fixture.env.SOUL_JAR_TEST_SERVICE_LOG = serviceLog;
+  const platformProbe = await execFileP("bash", ["-c", "type systemctl; type launchctl; type curl; type uname; uname -s"], {
+    env: fixture.env,
+  });
+  assert.match(platformProbe.stdout, /systemctl is a function/);
+  assert.match(platformProbe.stdout, /launchctl is a function/);
+  assert.match(platformProbe.stdout, /curl is a function/);
+  assert.match(platformProbe.stdout, /uname is a function/);
+  assert.match(platformProbe.stdout, new RegExp(kind === "launchd" ? "Darwin" : "Linux"));
+  return {
+    serviceLog,
+    servicePath: kind === "launchd"
+      ? join(fixture.home, "Library", "LaunchAgents", "com.cnighswonger.cache-fix-proxy.plist")
+      : join(fixture.home, ".config", "systemd", "user", "cache-fix-proxy.service"),
+  };
+}
+
 async function snapshotTree(root) {
   const result = {};
 
@@ -130,6 +185,65 @@ test("--dry-run reports changes but performs zero writes", async () => {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("--dry-run narrates the entrypoint bridge service environment", async () => {
+  const fixture = await makeFixture();
+  try {
+    await enableFixtureServices(fixture, "systemd");
+    const { stdout } = await runInstaller(fixture, ["--dry-run"]);
+    assert.match(stdout, /CACHE_FIX_ENTRYPOINT_BRIDGE=1/);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+for (const kind of ["systemd", "launchd"]) {
+  test(`${kind}: stale service without entrypoint bridge is force-regenerated`, async () => {
+    const fixture = await makeFixture();
+    try {
+      const { serviceLog, servicePath } = await enableFixtureServices(fixture, kind);
+      await mkdir(dirname(servicePath), { recursive: true });
+      const previous = kind === "launchd"
+        ? `<key>CACHE_FIX_FORWARD_PROXY</key>\n<string>on</string>\n<key>CACHE_FIX_CA_DIR</key>\n<string>${fixture.claudeDir}/cache-fix-ca</string>\n`
+        : `Environment=CACHE_FIX_FORWARD_PROXY=on\nEnvironment=CACHE_FIX_CA_DIR=${fixture.claudeDir}/cache-fix-ca\n`;
+      await writeFile(servicePath, previous);
+
+      await runInstaller(fixture);
+
+      const rendered = await readFile(servicePath, "utf8");
+      if (kind === "launchd") {
+        assert.match(
+          rendered,
+          /<key>CACHE_FIX_ENTRYPOINT_BRIDGE<\/key>\n<string>1<\/string>/,
+        );
+      } else {
+        assert.match(rendered, /^Environment=CACHE_FIX_ENTRYPOINT_BRIDGE=1$/m);
+      }
+      assert.equal(await readFile(serviceLog, "utf8"), "normal\nforce\n");
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test(`${kind}: current service with entrypoint bridge is left unchanged`, async () => {
+    const fixture = await makeFixture();
+    try {
+      const { serviceLog, servicePath } = await enableFixtureServices(fixture, kind);
+      await mkdir(dirname(servicePath), { recursive: true });
+      const current = kind === "launchd"
+        ? `<key>CACHE_FIX_FORWARD_PROXY</key>\n<string>on</string>\n<key>CACHE_FIX_CA_DIR</key>\n<string>${fixture.claudeDir}/cache-fix-ca</string>\n<key>CACHE_FIX_ENTRYPOINT_BRIDGE</key>\n<string>1</string>\n<!-- keep -->\n`
+        : `Environment=CACHE_FIX_FORWARD_PROXY=on\nEnvironment=CACHE_FIX_CA_DIR=${fixture.claudeDir}/cache-fix-ca\nEnvironment=CACHE_FIX_ENTRYPOINT_BRIDGE=1\n# keep\n`;
+      await writeFile(servicePath, current);
+
+      const { stdout } = await runInstaller(fixture);
+
+      assert.equal(await readFile(servicePath, "utf8"), current, stdout);
+      assert.equal(await readFile(serviceLog, "utf8"), "normal\n");
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("round trip restores absent settings and soul-jar config to absence", async () => {
   const fixture = await makeFixture();

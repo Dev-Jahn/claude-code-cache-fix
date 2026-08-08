@@ -545,13 +545,31 @@ service_file() {
   fi
 }
 
-service_has_forward_mode() {
+service_has_plist_value() {
+  local path=$1 key=$2 value=$3
+  awk -v key_line="<key>$key</key>" -v value_line="<string>$value</string>" '
+    {
+      line = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (previous == key_line && line == value_line) found = 1
+      previous = line
+    }
+    END { exit found ? 0 : 1 }
+  ' "$path"
+}
+
+service_has_companion_mode() {
   local path ca_dir
   path=$(service_file)
   ca_dir="$CLAUDE_DIR/cache-fix-ca"
   [[ -f $path ]] || return 1
-  grep -q 'CACHE_FIX_FORWARD_PROXY' "$path" || return 1
-  grep -q '>on<\|=on' "$path" || return 1
+  if [[ $PLATFORM == linux ]]; then
+    grep -Fxq 'Environment=CACHE_FIX_FORWARD_PROXY=on' "$path" || return 1
+    grep -Fxq 'Environment=CACHE_FIX_ENTRYPOINT_BRIDGE=1' "$path" || return 1
+  else
+    service_has_plist_value "$path" CACHE_FIX_FORWARD_PROXY on || return 1
+    service_has_plist_value "$path" CACHE_FIX_ENTRYPOINT_BRIDGE 1 || return 1
+  fi
   if [[ $CLAUDE_DIR != "$HOME/.claude" ]]; then
     grep -Fq 'CACHE_FIX_CA_DIR' "$path" || return 1
     grep -Fq "$ca_dir" "$path" || return 1
@@ -560,7 +578,8 @@ service_has_forward_mode() {
 
 run_service_installer() {
   local force=${1:-0} output rc
-  local command=(env CACHE_FIX_FORWARD_PROXY=on CACHE_FIX_PROXY_PORT="$PORT" \
+  local command=(env CACHE_FIX_FORWARD_PROXY=on CACHE_FIX_ENTRYPOINT_BRIDGE=1 \
+    CACHE_FIX_PROXY_PORT="$PORT" \
     CACHE_FIX_CA_DIR="$CLAUDE_DIR/cache-fix-ca" node "$INSTALL_DIR/bin/claude-via-proxy.mjs" install-service)
   ((force)) && command+=(--force)
   if ((DRY_RUN)); then
@@ -624,7 +643,7 @@ install_service() {
   local rc=0
   if ((DRY_RUN)); then
     run_service_installer
-    if [[ -f $(service_file) ]] && ! service_has_forward_mode; then
+    if [[ -f $(service_file) ]] && ! service_has_companion_mode; then
       run_service_installer 1
     fi
     if [[ $PLATFORM == linux ]]; then
@@ -636,10 +655,10 @@ install_service() {
   fi
   run_service_installer || rc=$?
   if ((rc == 10)); then
-    if service_has_forward_mode; then
-      printf 'Existing service already uses CACHE_FIX_FORWARD_PROXY=on.\n'
+    if service_has_companion_mode; then
+      printf 'Existing service already has the required companion environment.\n'
     else
-      printf 'Upgrading existing service to forward-proxy mode.\n'
+      printf 'Upgrading existing service with the required companion environment.\n'
       run_service_installer 1
     fi
   elif ((rc != 0)); then

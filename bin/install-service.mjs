@@ -42,6 +42,9 @@ function getDefaults() {
     // match, same as hotReload. Note: clients still wire HTTPS_PROXY +
     // NODE_EXTRA_CA_CERTS themselves (the service only controls the proxy end).
     forwardProxy: process.env.CACHE_FIX_FORWARD_PROXY === "on" ? "on" : "",
+    // The entrypoint bridge uses a strict "1" gate. Capture the same literal
+    // at install time so managed services can persist interactive prefix shapes.
+    entrypointBridge: process.env.CACHE_FIX_ENTRYPOINT_BRIDGE === "1" ? "1" : "",
     workingDir: resolve(__dirname, ".."),
   };
 }
@@ -127,6 +130,9 @@ function renderSystemdTemplate(template, vars) {
   const forwardProxyLine = vars.forwardProxy
     ? `Environment=CACHE_FIX_FORWARD_PROXY=${vars.forwardProxy}`
     : "";
+  const entrypointBridgeLine = vars.entrypointBridge
+    ? `Environment=CACHE_FIX_ENTRYPOINT_BRIDGE=${vars.entrypointBridge}`
+    : "";
   // Allow callers to wire a Requires= line (e.g. another service the proxy
   // chains to). Empty string by default so the unit has no extra deps.
   const requiresLine = vars.requires
@@ -143,6 +149,7 @@ function renderSystemdTemplate(template, vars) {
     .replaceAll("{{CA_DIR_LINE}}", caDirLine)
     .replaceAll("{{HOT_RELOAD_LINE}}", hotReloadLine)
     .replaceAll("{{FORWARD_PROXY_LINE}}", forwardProxyLine)
+    .replaceAll("{{ENTRYPOINT_BRIDGE_LINE}}", entrypointBridgeLine)
     .replaceAll("{{REQUIRES_LINE}}", requiresLine)
     .replaceAll("{{WORKING_DIR}}", vars.workingDir)
     // Collapse triple newlines from empty optional lines down to single blank
@@ -171,6 +178,9 @@ function renderLaunchdTemplate(template, vars) {
   const forwardProxyPlist = vars.forwardProxy
     ? `        <key>CACHE_FIX_FORWARD_PROXY</key>\n        <string>${vars.forwardProxy}</string>`
     : "";
+  const entrypointBridgePlist = vars.entrypointBridge
+    ? `        <key>CACHE_FIX_ENTRYPOINT_BRIDGE</key>\n        <string>${vars.entrypointBridge}</string>`
+    : "";
   return template
     .replaceAll("{{NODE}}", vars.node)
     .replaceAll("{{SERVER_PATH}}", vars.serverPath)
@@ -182,6 +192,7 @@ function renderLaunchdTemplate(template, vars) {
     .replaceAll("{{CA_DIR_PLIST}}", caDirPlist)
     .replaceAll("{{HOT_RELOAD_PLIST}}", hotReloadPlist)
     .replaceAll("{{FORWARD_PROXY_PLIST}}", forwardProxyPlist)
+    .replaceAll("{{ENTRYPOINT_BRIDGE_PLIST}}", entrypointBridgePlist)
     .replaceAll("{{WORKING_DIR}}", vars.workingDir)
     .replaceAll("{{LOG_DIR}}", vars.logDir)
     .replace(/\n\n+/g, "\n");
