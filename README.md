@@ -110,6 +110,8 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:9801 claude
 
 That's it. The proxy applies its default extension pipeline automatically. No wrapper scripts, no `NODE_OPTIONS`, no preload.
 
+> **soul-jar users:** See the [soul-jar companion one-line installer](docs/soul-jar-companion.md) for a supervised forward-proxy setup that lets resumed dreams reuse the session cache.
+
 ### Forward-proxy mode (keeps Remote Control working)
 
 The quick-start above is **reverse-proxy mode**: you point `ANTHROPIC_BASE_URL` at the proxy. That is simple, but on Claude Code **>= 2.1.196** a non-Anthropic `ANTHROPIC_BASE_URL` **disables Remote Control** (`/remote-control`), `/schedule`, and claude.ai MCP connectors (CC treats any custom base URL like a Bedrock/Vertex gateway). If you rely on those features, use forward-proxy mode instead.
