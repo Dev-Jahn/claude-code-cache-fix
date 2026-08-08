@@ -12,6 +12,8 @@ INSTALL_DIR=""
 PLATFORM=""
 SYSTEMCTL_ENV=""
 BACKUP_PATH=""
+STATE_PATH=""
+HAD_STATE=0
 
 usage() {
   cat <<'EOF'
@@ -94,6 +96,8 @@ parse_args() {
   if [[ -z $INSTALL_DIR ]]; then
     INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/claude-code-cache-fix"
   fi
+  [[ $INSTALL_DIR != *[[:space:]]* ]] || \
+    die "install directory contains whitespace; choose a space-free --dir path"
 }
 
 set_paths() {
@@ -103,6 +107,7 @@ set_paths() {
   SOUL_CONFIG_PATH="$SOUL_JAR_DIR/config"
   CA_PEM="$CLAUDE_DIR/cache-fix-ca/ca.pem"
   PROXY_URL="http://127.0.0.1:$PORT"
+  STATE_PATH="$INSTALL_DIR/.companion-state.json"
 }
 
 require_command() {
@@ -199,10 +204,11 @@ transform_settings() {
   # shellcheck disable=SC2016
   node -e '
 const fs = require("fs");
-const [path, mode, action, proxyUrl, caPem] = process.argv.slice(1);
+const [path, statePath, mode, action, proxyUrl, caPem] = process.argv.slice(1);
 let root = {};
+let source = "";
 if (fs.existsSync(path)) {
-  try { root = JSON.parse(fs.readFileSync(path, "utf8")); }
+  try { source = fs.readFileSync(path, "utf8"); root = JSON.parse(source); }
   catch (error) { console.error(`Invalid JSON in ${path}: ${error.message}`); process.exit(1); }
 }
 if (!root || typeof root !== "object" || Array.isArray(root)) {
@@ -214,10 +220,11 @@ if (root.env !== undefined && (!root.env || typeof root.env !== "object" || Arra
 const env = root.env || {};
 const own = (key) => Object.prototype.hasOwnProperty.call(env, key);
 const locals = ["localhost", "127.0.0.1", "::1"];
+const entries = (value) => String(value || "").split(",").map((part) => part.trim()).filter(Boolean);
 const merge = (value) => {
-  const entries = String(value || "").split(",").map((part) => part.trim()).filter(Boolean);
-  for (const entry of locals) if (!entries.includes(entry)) entries.push(entry);
-  return entries.join(",");
+  const result = entries(value);
+  for (const entry of locals) if (!result.includes(entry)) result.push(entry);
+  return result.join(",");
 };
 const strip = (value) => String(value || "").split(",").map((part) => part.trim())
   .filter((entry) => entry && !locals.includes(entry)).join(",");
@@ -229,8 +236,14 @@ if (mode === "install") {
     console.error(`${path}: .env.ANTHROPIC_BASE_URL already exists; reverse and forward proxy wiring cannot be stacked`);
     process.exit(2);
   }
-  if (own("HTTPS_PROXY") && env.HTTPS_PROXY !== proxyUrl) {
-    console.error(`${path}: .env.HTTPS_PROXY already points at ${JSON.stringify(env.HTTPS_PROXY)}; refusing to replace an existing proxy`);
+  for (const key of ["HTTPS_PROXY", "https_proxy"]) {
+    if (own(key) && env[key] !== proxyUrl) {
+      console.error(`${path}: .env.${key} already points at ${JSON.stringify(env[key])}; refusing to replace an existing proxy`);
+      process.exit(2);
+    }
+  }
+  if (own("NODE_EXTRA_CA_CERTS") && env.NODE_EXTRA_CA_CERTS !== caPem) {
+    console.error(`${path}: .env.NODE_EXTRA_CA_CERTS already points at ${JSON.stringify(env.NODE_EXTRA_CA_CERTS)}; publish component CAs under the repo\x27s ca-trust.d contract and use its merged bundle instead of replacing the existing CA path`);
     process.exit(2);
   }
   desired.env.HTTPS_PROXY = proxyUrl;
@@ -238,6 +251,33 @@ if (mode === "install") {
   desired.env.NODE_EXTRA_CA_CERTS = caPem;
   desired.env.NO_PROXY = merge(env.NO_PROXY);
   desired.env.no_proxy = merge(env.no_proxy);
+} else if (fs.existsSync(statePath)) {
+  let state;
+  try { state = JSON.parse(fs.readFileSync(statePath, "utf8")); }
+  catch (error) { console.error(`Invalid companion state in ${statePath}: ${error.message}`); process.exit(1); }
+  const settings = state.settings;
+  for (const [key, installed] of [
+    ["HTTPS_PROXY", proxyUrl], ["https_proxy", proxyUrl], ["NODE_EXTRA_CA_CERTS", caPem],
+  ]) {
+    const prior = settings.env[key];
+    if (desired.env[key] !== installed) continue;
+    if (prior.preExisting) desired.env[key] = prior.value;
+    else delete desired.env[key];
+  }
+  for (const key of ["NO_PROXY", "no_proxy"]) {
+    if (!own(key)) continue;
+    const prior = settings.noProxy[key];
+    const added = new Set(prior.added);
+    const value = entries(env[key]).filter((entry) => !added.has(entry)).join(",");
+    if (value || prior.preExisting) desired.env[key] = value;
+    else delete desired.env[key];
+  }
+  if (Object.keys(desired.env).length === 0 && !settings.envExisted) delete desired.env;
+  if (!settings.existed && JSON.stringify(desired) === "{}") {
+    if (action === "status") process.stdout.write(fs.existsSync(path) ? "change" : "same");
+    else fs.rmSync(path, { force: true });
+    process.exit(0);
+  }
 } else {
   for (const key of ["HTTPS_PROXY", "https_proxy"]) {
     if (desired.env[key] === proxyUrl) delete desired.env[key];
@@ -254,9 +294,16 @@ if (mode === "install") {
 if (action === "status") {
   process.stdout.write(original === JSON.stringify(desired) ? "same" : "change");
 } else {
-  fs.writeFileSync(path, `${JSON.stringify(desired, null, 2)}\n`);
+  const body = source.replace(/\r?\n$/, "");
+  const indentMatch = body.match(/\r?\n([ \t]+)"/);
+  const indent = body.includes("\n") ? (indentMatch ? indentMatch[1] : 2) : (source ? 0 : 2);
+  const eol = source.includes("\r\n") ? "\r\n" : "\n";
+  const trailing = !source || source.endsWith("\n");
+  let output = JSON.stringify(desired, null, indent).replace(/\n/g, eol);
+  if (trailing) output += eol;
+  fs.writeFileSync(path, output);
 }
-' "$SETTINGS_PATH" "$mode" "$action" "$PROXY_URL" "$CA_PEM"
+' "$SETTINGS_PATH" "$STATE_PATH" "$mode" "$action" "$PROXY_URL" "$CA_PEM"
 }
 
 settings_status() {
@@ -301,13 +348,110 @@ apply_settings() {
   fi
 }
 
+validate_companion_state() {
+  [[ -f $STATE_PATH ]] || return 0
+  # The embedded JavaScript uses template literals; the shell must not expand them.
+  # shellcheck disable=SC2016
+  node -e '
+const fs = require("fs");
+const path = process.argv[1];
+try {
+  const state = JSON.parse(fs.readFileSync(path, "utf8"));
+  const keys = ["HTTPS_PROXY", "https_proxy", "NODE_EXTRA_CA_CERTS"];
+  const noProxyKeys = ["NO_PROXY", "no_proxy"];
+  if (state.version !== 1 || typeof state.settings?.existed !== "boolean" ||
+      typeof state.settings?.envExisted !== "boolean" ||
+      typeof state.soulConfig?.existed !== "boolean" ||
+      typeof state.soulConfig?.dreamDisableCache?.existed !== "boolean" ||
+      typeof state.soulConfig?.commentAdded !== "boolean" ||
+      !keys.every((key) => typeof state.settings?.env?.[key]?.preExisting === "boolean") ||
+      !noProxyKeys.every((key) => typeof state.settings?.noProxy?.[key]?.preExisting === "boolean" &&
+        Array.isArray(state.settings.noProxy[key].added))) {
+    throw new Error("unsupported or incomplete state schema");
+  }
+} catch (error) {
+  console.error(`Invalid companion state in ${path}: ${error.message}`);
+  process.exit(1);
+}
+' "$STATE_PATH"
+}
+
+write_companion_state() {
+  [[ -f $STATE_PATH ]] && return 0
+  # The embedded JavaScript uses template literals; the shell must not expand them.
+  # shellcheck disable=SC2016
+  node -e '
+const fs = require("fs");
+const { randomUUID } = require("crypto");
+const [statePath, settingsPath, soulPath, proxyUrl, caPem] = process.argv.slice(1);
+let root = {};
+const settingsExisted = fs.existsSync(settingsPath);
+if (settingsExisted) root = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+const env = root.env || {};
+const own = (key) => Object.prototype.hasOwnProperty.call(env, key);
+const locals = ["localhost", "127.0.0.1", "::1"];
+const entries = (value) => String(value || "").split(",").map((part) => part.trim()).filter(Boolean);
+const managed = {};
+for (const [key, value] of [
+  ["HTTPS_PROXY", proxyUrl], ["https_proxy", proxyUrl], ["NODE_EXTRA_CA_CERTS", caPem],
+]) {
+  managed[key] = own(key)
+    ? { preExisting: true, value: env[key] }
+    : { preExisting: false, value };
+}
+const noProxy = {};
+for (const key of ["NO_PROXY", "no_proxy"]) {
+  const present = new Set(entries(env[key]));
+  noProxy[key] = {
+    preExisting: own(key),
+    added: locals.filter((entry) => !present.has(entry)),
+  };
+}
+const soulExisted = fs.existsSync(soulPath);
+const soulSource = soulExisted ? fs.readFileSync(soulPath, "utf8") : "";
+const lines = soulSource ? soulSource.replace(/\n$/, "").split("\n") : [];
+const dreamIndex = lines.findIndex((line) => line.startsWith("DREAM_DISABLE_CACHE="));
+const comment = "# soul-jar companion: a canonicalizing proxy fronts sessions.";
+const state = {
+  version: 1,
+  settings: {
+    existed: settingsExisted,
+    envExisted: Object.prototype.hasOwnProperty.call(root, "env"),
+    env: managed,
+    noProxy,
+  },
+  soulConfig: {
+    existed: soulExisted,
+    dreamDisableCache: {
+      existed: dreamIndex !== -1,
+      line: dreamIndex === -1 ? null : lines[dreamIndex].replace(/\r$/, ""),
+    },
+    commentAdded: dreamIndex === -1 || dreamIndex === 0 || lines[dreamIndex - 1] !== comment,
+  },
+};
+const temporary = `${statePath}.${process.pid}.${randomUUID()}`;
+fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+fs.renameSync(temporary, statePath);
+' "$STATE_PATH" "$SETTINGS_PATH" "$SOUL_CONFIG_PATH" "$PROXY_URL" "$CA_PEM"
+}
+
+ensure_companion_state() {
+  if [[ -f $STATE_PATH ]]; then
+    validate_companion_state
+  elif ((DRY_RUN)); then
+    printf 'DRY-RUN: write ownership state to %q\n' "$STATE_PATH"
+  else
+    write_companion_state
+  fi
+}
+
 soul_config_transform() {
   local mode=$1 action=$2
   # The embedded JavaScript uses template literals; the shell must not expand them.
   # shellcheck disable=SC2016
   node -e '
 const fs = require("fs");
-const [path, mode, action] = process.argv.slice(1);
+const [path, statePath, mode, action] = process.argv.slice(1);
 const comment = "# soul-jar companion: a canonicalizing proxy fronts sessions.";
 const original = fs.existsSync(path) ? fs.readFileSync(path, "utf8") : "";
 let lines = original ? original.replace(/\n$/, "").split("\n") : [];
@@ -318,6 +462,26 @@ if (mode === "install") {
     lines[index] = "DREAM_DISABLE_CACHE=0";
     if (index === 0 || lines[index - 1] !== comment) lines.splice(index, 0, comment);
   }
+} else if (fs.existsSync(statePath)) {
+  let state;
+  try { state = JSON.parse(fs.readFileSync(statePath, "utf8")); }
+  catch (error) { console.error(`Invalid companion state in ${statePath}: ${error.message}`); process.exit(1); }
+  const prior = state.soulConfig;
+  if (index !== -1 && lines[index] === "DREAM_DISABLE_CACHE=0") {
+    if (prior.dreamDisableCache.existed) {
+      lines[index] = prior.dreamDisableCache.line;
+      if (prior.commentAdded && index > 0 && lines[index - 1] === comment) lines.splice(index - 1, 1);
+    } else {
+      lines.splice(index, 1);
+      if (prior.commentAdded && index > 0 && lines[index - 1] === comment) lines.splice(index - 1, 1);
+    }
+  }
+  const desired = lines.length ? `${lines.join("\n")}\n` : "";
+  if (!prior.existed && desired === "") {
+    if (action === "status") process.stdout.write(fs.existsSync(path) ? "change" : "same");
+    else fs.rmSync(path, { force: true });
+    process.exit(0);
+  }
 } else if (index === -1) {
   lines.push("DREAM_DISABLE_CACHE=auto");
 } else {
@@ -327,7 +491,7 @@ if (mode === "install") {
 const desired = lines.length ? `${lines.join("\n")}\n` : "";
 if (action === "status") process.stdout.write(original === desired ? "same" : "change");
 else fs.writeFileSync(path, desired);
-' "$SOUL_CONFIG_PATH" "$mode" "$action"
+' "$SOUL_CONFIG_PATH" "$STATE_PATH" "$mode" "$action"
 }
 
 soul_config_status() {
@@ -365,12 +529,12 @@ prepare_checkout() {
 }
 
 install_dependencies() {
+  local npm_cache="$INSTALL_DIR/.npm-cache"
   if ((DRY_RUN)); then
-    print_command npm --prefix "$INSTALL_DIR" ci --omit=dev
-    printf 'DRY-RUN: if npm ci fails, run npm --prefix %q install --omit=dev\n' "$INSTALL_DIR"
+    print_command env "npm_config_cache=$npm_cache" npm --prefix "$INSTALL_DIR" ci --omit=dev
     return
   fi
-  npm --prefix "$INSTALL_DIR" ci --omit=dev || npm --prefix "$INSTALL_DIR" install --omit=dev
+  npm_config_cache=$npm_cache npm --prefix "$INSTALL_DIR" ci --omit=dev
 }
 
 service_file() {
@@ -608,8 +772,12 @@ soul-jar companion wiring removed.
   Claude config: $SETTINGS_PATH
   soul-jar:      $SOUL_CONFIG_PATH
   Checkout kept: $INSTALL_DIR
-No user data was deleted.
 EOF
+  if ((HAD_STATE)); then
+    printf 'Only values recorded as companion-owned were removed.\n'
+  else
+    printf 'Legacy fallback completed; review the settings backup if ownership was ambiguous.\n'
+  fi
   if [[ -n $BACKUP_PATH ]]; then
     printf '  Settings backup: %s\n' "$BACKUP_PATH"
   fi
@@ -618,6 +786,8 @@ EOF
 install_companion() {
   basic_preflight
   settings_status install >/dev/null
+  soul_config_status install >/dev/null
+  validate_companion_state
   service_preflight
   prepare_checkout
   install_dependencies
@@ -625,6 +795,7 @@ install_companion() {
   guard_port
   wait_for_health
   wait_for_ca
+  ensure_companion_state
   apply_settings install
   apply_soul_config install
   print_install_summary
@@ -632,10 +803,18 @@ install_companion() {
 
 uninstall_companion() {
   preflight
+  if [[ -f $STATE_PATH ]]; then
+    HAD_STATE=1
+    validate_companion_state
+  else
+    printf 'Companion ownership state is missing at %s; using conservative equality-based uninstall.\n' \
+      "$STATE_PATH"
+  fi
   backup_settings
   uninstall_service
   apply_settings uninstall
   apply_soul_config uninstall
+  run_mutation rm -f "$STATE_PATH"
   print_uninstall_summary
 }
 

@@ -59,6 +59,7 @@ async function makeFixture() {
     claudeDir,
     soulJarDir,
     checkout,
+    source,
     settingsPath: join(claudeDir, "settings.json"),
     soulConfigPath: join(soulJarDir, "config"),
     env: {
@@ -105,6 +106,10 @@ async function backupNames(claudeDir) {
     .sort();
 }
 
+async function assertMissing(path) {
+  await assert.rejects(readFile(path), { code: "ENOENT" });
+}
+
 test("--dry-run reports changes but performs zero writes", async () => {
   const fixture = await makeFixture();
   try {
@@ -118,7 +123,119 @@ test("--dry-run reports changes but performs zero writes", async () => {
     const { stdout } = await runInstaller(fixture, ["--dry-run"]);
 
     assert.match(stdout, /DRY-RUN/);
+    assert.match(stdout, /npm_config_cache=.*\.npm-cache/);
+    assert.doesNotMatch(stdout, /npm .*install --omit=dev/);
     assert.deepEqual(await snapshotTree(fixture.root), before);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("round trip restores absent settings and soul-jar config to absence", async () => {
+  const fixture = await makeFixture();
+  try {
+    await runInstaller(fixture);
+    const state = JSON.parse(
+      await readFile(join(fixture.checkout, ".companion-state.json"), "utf8"),
+    );
+    assert.equal(state.settings.existed, false);
+    assert.equal(state.soulConfig.existed, false);
+    await runInstaller(fixture, ["--uninstall"]);
+
+    await assertMissing(fixture.settingsPath);
+    await assertMissing(fixture.soulConfigPath);
+    await assertMissing(join(fixture.checkout, ".companion-state.json"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("round trip byte-preserves pre-existing local no-proxy entries", async () => {
+  const fixture = await makeFixture();
+  const initialSettings = `${JSON.stringify({
+    env: {
+      EXISTING: "keep",
+      NO_PROXY: "corp.example,localhost,127.0.0.1",
+      no_proxy: "::1,x.example",
+    },
+    theme: "dark",
+  }, null, 2)}\n`;
+  try {
+    await writeFile(fixture.settingsPath, initialSettings);
+    await runInstaller(fixture);
+    const state = JSON.parse(
+      await readFile(join(fixture.checkout, ".companion-state.json"), "utf8"),
+    );
+    assert.deepEqual(state.settings.noProxy.NO_PROXY.added, ["::1"]);
+    assert.deepEqual(state.settings.noProxy.no_proxy.added, ["localhost", "127.0.0.1"]);
+    await runInstaller(fixture, ["--uninstall"]);
+
+    assert.equal(await readFile(fixture.settingsPath, "utf8"), initialSettings);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("round trip preserves pre-existing empty no-proxy keys", async () => {
+  const fixture = await makeFixture();
+  const initialSettings = `${JSON.stringify({ env: { NO_PROXY: "", no_proxy: "" } })}\n`;
+  try {
+    await writeFile(fixture.settingsPath, initialSettings);
+    await runInstaller(fixture);
+    await runInstaller(fixture, ["--uninstall"]);
+
+    assert.equal(await readFile(fixture.settingsPath, "utf8"), initialSettings);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+for (const prior of ["DREAM_DISABLE_CACHE=1", "DREAM_DISABLE_CACHE=0"]) {
+  test(`round trip restores exact pre-existing ${prior} line`, async () => {
+    const fixture = await makeFixture();
+    const initialSoul = `OTHER=value\n${prior}\nTAIL=keep\n`;
+    try {
+      await writeFile(fixture.soulConfigPath, initialSoul);
+      await runInstaller(fixture);
+      await runInstaller(fixture, ["--uninstall"]);
+
+      assert.equal(await readFile(fixture.soulConfigPath, "utf8"), initialSoul);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("round trip removes the DREAM line and comment added to an existing config", async () => {
+  const fixture = await makeFixture();
+  const initialSoul = "OTHER=value\nTAIL=keep\n";
+  try {
+    await writeFile(fixture.soulConfigPath, initialSoul);
+    await runInstaller(fixture);
+    await runInstaller(fixture, ["--uninstall"]);
+
+    assert.equal(await readFile(fixture.soulConfigPath, "utf8"), initialSoul);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("round trip preserves pre-existing identical managed env values", async () => {
+  const fixture = await makeFixture();
+  const initialSettings = `${JSON.stringify({
+    env: {
+      EXISTING: "keep",
+      HTTPS_PROXY: "http://127.0.0.1:9801",
+      https_proxy: "http://127.0.0.1:9801",
+      NODE_EXTRA_CA_CERTS: join(fixture.claudeDir, "cache-fix-ca", "ca.pem"),
+    },
+  })}\n`;
+  try {
+    await writeFile(fixture.settingsPath, initialSettings);
+    await runInstaller(fixture);
+    await runInstaller(fixture, ["--uninstall"]);
+
+    assert.equal(await readFile(fixture.settingsPath, "utf8"), initialSettings);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -180,12 +297,19 @@ test("second install is idempotent and creates no backup", async () => {
     await runInstaller(fixture);
     const settingsAfterFirst = await readFile(fixture.settingsPath);
     const soulAfterFirst = await readFile(fixture.soulConfigPath);
+    const stateAfterFirst = await readFile(join(fixture.checkout, ".companion-state.json"));
     const backupsAfterFirst = await backupNames(fixture.claudeDir);
+    const homeAfterFirst = await snapshotTree(fixture.home);
     await runInstaller(fixture);
 
     assert.deepEqual(await readFile(fixture.settingsPath), settingsAfterFirst);
     assert.deepEqual(await readFile(fixture.soulConfigPath), soulAfterFirst);
+    assert.deepEqual(
+      await readFile(join(fixture.checkout, ".companion-state.json")),
+      stateAfterFirst,
+    );
     assert.deepEqual(await backupNames(fixture.claudeDir), backupsAfterFirst);
+    assert.deepEqual(await snapshotTree(fixture.home), homeAfterFirst);
     assert.equal(backupsAfterFirst.length, 1);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -202,6 +326,16 @@ for (const [name, conflictingEnv, message] of [
     "different HTTPS_PROXY",
     { HTTPS_PROXY: "http://corporate.example:8443" },
     /HTTPS_PROXY/,
+  ],
+  [
+    "different https_proxy",
+    { https_proxy: "http://corporate.example:8443" },
+    /https_proxy/,
+  ],
+  [
+    "different NODE_EXTRA_CA_CERTS",
+    { NODE_EXTRA_CA_CERTS: "/corporate/ca-bundle.pem" },
+    /ca-trust\.d.*merged bundle/is,
   ],
 ]) {
   test(`${name} aborts before any mutation`, async () => {
@@ -247,7 +381,8 @@ test("uninstall removes only installer-owned current values", async () => {
       "# soul-jar companion: a canonicalizing proxy fronts sessions.\nDREAM_DISABLE_CACHE=0\n",
     );
 
-    await runInstaller(fixture, ["--uninstall"]);
+    const { stdout } = await runInstaller(fixture, ["--uninstall"]);
+    assert.match(stdout, /ownership state.*missing.*conservative equality-based/is);
     const settings = JSON.parse(await readFile(fixture.settingsPath, "utf8"));
     assert.equal(settings.env.HTTPS_PROXY, "http://changed-after-install.example:8080");
     assert.ok(!("https_proxy" in settings.env));
@@ -255,6 +390,50 @@ test("uninstall removes only installer-owned current values", async () => {
     assert.equal(settings.env.NO_PROXY, "corp.example");
     assert.equal(settings.env.no_proxy, "keep.example");
     assert.equal(await readFile(fixture.soulConfigPath, "utf8"), "DREAM_DISABLE_CACHE=auto\n");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("lockfile mismatch fails at npm ci without an install fallback", async () => {
+  const fixture = await makeFixture();
+  try {
+    const packagePath = join(fixture.source, "package.json");
+    const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
+    packageJson.dependencies = { "left-pad": "1.3.0" };
+    await writeFile(packagePath, `${JSON.stringify(packageJson)}\n`);
+    await execFileP("git", ["add", "package.json"], { cwd: fixture.source });
+    await execFileP("git", ["commit", "-m", "make lock stale"], { cwd: fixture.source });
+    const lockBefore = await readFile(join(fixture.checkout, "package-lock.json"));
+
+    await assert.rejects(runInstaller(fixture), (error) => {
+      assert.notEqual(error.code, 0);
+      assert.match(error.stderr, /npm error|npm ERR!/);
+      return true;
+    });
+    assert.deepEqual(await readFile(join(fixture.checkout, "package-lock.json")), lockBefore);
+    await assertMissing(join(fixture.home, ".npm"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("install directory containing whitespace is rejected before mutation", async () => {
+  const fixture = await makeFixture();
+  const spacedCheckout = join(fixture.root, "checkout with space");
+  try {
+    await execFileP("git", ["clone", "--branch", "soul-jar", fixture.source, spacedCheckout]);
+    const before = await snapshotTree(fixture.root);
+
+    await assert.rejects(
+      runInstaller(fixture, ["--dir", spacedCheckout]),
+      (error) => {
+        assert.notEqual(error.code, 0);
+        assert.match(error.stderr, /install directory.*whitespace.*space-free --dir/is);
+        return true;
+      },
+    );
+    assert.deepEqual(await snapshotTree(fixture.root), before);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
