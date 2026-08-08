@@ -26,6 +26,11 @@ function getDefaults() {
     caFile: process.env.CACHE_FIX_PROXY_CA_FILE || "",
     rejectUnauthorized: process.env.CACHE_FIX_PROXY_REJECT_UNAUTHORIZED || "",
     debug: process.env.CACHE_FIX_DEBUG || "",
+    // Pin the forward-proxy CA to a caller-selected Claude config directory.
+    // A service manager does not reliably inherit CLAUDE_CONFIG_DIR from the
+    // shell that installs it, so the companion installer passes the resolved
+    // location explicitly as CACHE_FIX_CA_DIR.
+    caDir: process.env.CACHE_FIX_CA_DIR || "",
     // Hot-reload is opt-in as of v4.0.0 (#196). Capture from env at install
     // time so the operator can bake `CACHE_FIX_HOT_RELOAD=on` into the
     // generated unit/plist via `CACHE_FIX_HOT_RELOAD=on cache-fix-proxy
@@ -113,6 +118,9 @@ function renderSystemdTemplate(template, vars) {
   const debugLine = vars.debug
     ? `Environment=CACHE_FIX_DEBUG=${systemdEscape(vars.debug)}`
     : "";
+  const caDirLine = vars.caDir
+    ? `Environment=CACHE_FIX_CA_DIR=${systemdEscape(vars.caDir)}`
+    : "";
   const hotReloadLine = vars.hotReload
     ? `Environment=CACHE_FIX_HOT_RELOAD=${vars.hotReload}`
     : "";
@@ -132,6 +140,7 @@ function renderSystemdTemplate(template, vars) {
     .replaceAll("{{CA_FILE_LINE}}", caFileLine)
     .replaceAll("{{REJECT_UNAUTHORIZED_LINE}}", rejectUnauthorizedLine)
     .replaceAll("{{DEBUG_LINE}}", debugLine)
+    .replaceAll("{{CA_DIR_LINE}}", caDirLine)
     .replaceAll("{{HOT_RELOAD_LINE}}", hotReloadLine)
     .replaceAll("{{FORWARD_PROXY_LINE}}", forwardProxyLine)
     .replaceAll("{{REQUIRES_LINE}}", requiresLine)
@@ -153,6 +162,9 @@ function renderLaunchdTemplate(template, vars) {
   const debugPlist = vars.debug
     ? `        <key>CACHE_FIX_DEBUG</key>\n        <string>${xmlEscape(vars.debug)}</string>`
     : "";
+  const caDirPlist = vars.caDir
+    ? `        <key>CACHE_FIX_CA_DIR</key>\n        <string>${xmlEscape(vars.caDir)}</string>`
+    : "";
   const hotReloadPlist = vars.hotReload
     ? `        <key>CACHE_FIX_HOT_RELOAD</key>\n        <string>${vars.hotReload}</string>`
     : "";
@@ -167,6 +179,7 @@ function renderLaunchdTemplate(template, vars) {
     .replaceAll("{{CA_FILE_PLIST}}", caFilePlist)
     .replaceAll("{{REJECT_UNAUTHORIZED_PLIST}}", rejectUnauthorizedPlist)
     .replaceAll("{{DEBUG_PLIST}}", debugPlist)
+    .replaceAll("{{CA_DIR_PLIST}}", caDirPlist)
     .replaceAll("{{HOT_RELOAD_PLIST}}", hotReloadPlist)
     .replaceAll("{{FORWARD_PROXY_PLIST}}", forwardProxyPlist)
     .replaceAll("{{WORKING_DIR}}", vars.workingDir)

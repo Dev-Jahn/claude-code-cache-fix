@@ -13,6 +13,7 @@ import {
   renderHealthcheckServiceTemplate,
   renderHealthcheckTimerTemplate,
   getPaths,
+  getDefaults,
   validatePort,
   InvalidPortError,
   installSystemd,
@@ -41,6 +42,7 @@ const sampleVars = {
   caFile: "",
   rejectUnauthorized: "",
   debug: "",
+  caDir: "",
   workingDir: "/opt/cache-fix",
   requires: "",
 };
@@ -63,6 +65,7 @@ test("renderSystemdTemplate: omits empty optional Environment lines", async () =
   assert.ok(!out.includes("CACHE_FIX_PROXY_CA_FILE"));
   assert.ok(!out.includes("CACHE_FIX_PROXY_REJECT_UNAUTHORIZED"));
   assert.ok(!out.includes("CACHE_FIX_DEBUG"));
+  assert.ok(!out.includes("CACHE_FIX_CA_DIR"));
   // No leftover empty placeholders
   assert.ok(!out.includes("{{"));
   assert.ok(!out.includes("}}"));
@@ -76,11 +79,13 @@ test("renderSystemdTemplate: includes UPSTREAM, CA_FILE, REJECT_UNAUTHORIZED and
     caFile: "/etc/ssl/ca \" file.pem", // with space and "
     rejectUnauthorized: "0",
     debug: "1",
+    caDir: "/tmp/claude & config/cache-fix-ca",
   });
   assert.ok(out.includes("Environment=CACHE_FIX_PROXY_UPSTREAM=http://127.0.0.1:8080"));
   assert.ok(out.includes("Environment=CACHE_FIX_PROXY_CA_FILE=\"/etc/ssl/ca \\\" file.pem\""));
   assert.ok(out.includes("Environment=CACHE_FIX_PROXY_REJECT_UNAUTHORIZED=0"));
   assert.ok(out.includes("Environment=CACHE_FIX_DEBUG=1"));
+  assert.ok(out.includes('Environment=CACHE_FIX_CA_DIR="/tmp/claude & config/cache-fix-ca"'));
 });
 
 test("renderSystemdTemplate: requires line wires both Requires and After", async () => {
@@ -152,6 +157,7 @@ test("renderLaunchdTemplate: includes UPSTREAM, CA_FILE, REJECT_UNAUTHORIZED and
     caFile: "/etc/ssl/ca & < > ' \" file.pem", // with XLM spec symbols
     rejectUnauthorized: "0",
     debug: "1",
+    caDir: "/Users/test/Claude & config/cache-fix-ca",
     logDir: "/Users/test/Library/Logs",
   });
   assert.ok(out.includes("<string>com.cnighswonger.cache-fix-proxy</string>"));
@@ -161,6 +167,8 @@ test("renderLaunchdTemplate: includes UPSTREAM, CA_FILE, REJECT_UNAUTHORIZED and
   assert.ok(out.includes("<string>http://127.0.0.1:8080</string>"));
   assert.ok(out.includes("<string>/etc/ssl/ca &amp; &lt; &gt; &apos; &quot; file.pem</string>"));
   assert.ok(out.includes("<string>0</string>"));
+  assert.ok(out.includes("<key>CACHE_FIX_CA_DIR</key>"));
+  assert.ok(out.includes("<string>/Users/test/Claude &amp; config/cache-fix-ca</string>"));
   assert.ok(out.includes("<string>/Users/test/Library/Logs/cache-fix-proxy.log</string>"));
   assert.ok(!out.includes("{{"));
 });
@@ -178,6 +186,7 @@ test("renderLaunchdTemplate: omits CACHE_FIX_PROXY_UPSTREAM/CA_FILE/REJECT_UNAUT
   assert.ok(!out.includes("CACHE_FIX_PROXY_CA_FILE"));
   assert.ok(!out.includes("CACHE_FIX_PROXY_REJECT_UNAUTHORIZED"));
   assert.ok(!out.includes("CACHE_FIX_DEBUG"));
+  assert.ok(!out.includes("CACHE_FIX_CA_DIR"));
 });
 
 // #196 / #198: CACHE_FIX_HOT_RELOAD env-capture rendering. install-service
@@ -322,6 +331,17 @@ test("getPaths: unsupported platform returns kind=unsupported", () => {
   const p = getPaths("freebsd");
   assert.equal(p.kind, "unsupported");
   assert.equal(p.platform, "freebsd");
+});
+
+test("getDefaults: captures CACHE_FIX_CA_DIR for managed services", () => {
+  const previous = process.env.CACHE_FIX_CA_DIR;
+  process.env.CACHE_FIX_CA_DIR = "/tmp/custom-claude/cache-fix-ca";
+  try {
+    assert.equal(getDefaults().caDir, "/tmp/custom-claude/cache-fix-ca");
+  } finally {
+    if (previous === undefined) delete process.env.CACHE_FIX_CA_DIR;
+    else process.env.CACHE_FIX_CA_DIR = previous;
+  }
 });
 
 // --- installSystemd / uninstallSystemd round-trip ---
