@@ -52,6 +52,15 @@ const config = {
   // so clients point HTTPS_PROXY (not ANTHROPIC_BASE_URL) at it and keep Remote
   // Control. See proxy/forward-proxy.mjs.
   get forwardProxy() { return process.env.CACHE_FIX_FORWARD_PROXY === "on"; },
+  // Node >= 20 dials dual-stack hosts with Happy Eyeballs (net autoSelectFamily):
+  // it tries the first resolved address for 250ms, then races the next family.
+  // On a host whose IPv6 is unroutable and whose IPv4 RTT to the target exceeds
+  // that window (measured: api.telegram.org, ~260ms from a v4-only container),
+  // the v4 attempt is abandoned, the v6 attempt fails instantly, and the whole
+  // connect reports ETIMEDOUT — every CONNECT to an AAAA-bearing host dies while
+  // A-only hosts sail through. Default OFF: dial the first resolved address and
+  // let the OS decide. Set CACHE_FIX_AUTO_SELECT_FAMILY=on to restore Node's default.
+  get autoSelectFamily() { return process.env.CACHE_FIX_AUTO_SELECT_FAMILY === "on"; },
   // Directory holding the forward-proxy's generated CA + leaf certs. Defaults
   // under the Claude config root (claudeHome() honors CLAUDE_CONFIG_DIR), like
   // the rest of the proxy's on-disk state, so relocating the config dir moves

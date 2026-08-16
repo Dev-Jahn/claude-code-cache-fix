@@ -1,4 +1,5 @@
 import http from "node:http";
+import net from "node:net";
 import { pathToFileURL, URL } from "node:url";
 import config from "./config.mjs";
 import { forwardRequest, parseAbsoluteForm } from "./upstream.mjs";
@@ -7,6 +8,11 @@ import { loadExtensions, snapshotRegistry, runOnRequest, runOnResponseStart, run
 import { startWatcher } from "./watcher.mjs";
 import { startOAuthRefresher, stopOAuthRefresher } from "./oauth/refresher.mjs";
 import { attachForwardProxy, handleDownloadsAbsolute } from "./forward-proxy.mjs";
+
+// Process-wide dial policy — set before any socket is opened so blindTunnel,
+// the MITM upstream agents and the downloads relay all inherit it (see
+// config.autoSelectFamily for the failure this prevents).
+net.setDefaultAutoSelectFamily(config.autoSelectFamily);
 
 // Debug logging — writes to ~/.claude/cache-fix-debug.log (override path with
 // CACHE_FIX_DEBUG_LOG). Self-gated on CACHE_FIX_DEBUG=1; a no-op otherwise.
