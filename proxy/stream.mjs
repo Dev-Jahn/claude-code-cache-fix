@@ -1,3 +1,4 @@
+import { StringDecoder } from "node:string_decoder";
 import { runOnStreamEvent } from "./pipeline.mjs";
 
 export function createTelemetryRecord() {
@@ -83,9 +84,12 @@ async function processLine(line, clientRes, telemetry, extSnapshot, meta, respon
 
 export async function streamResponse(upstreamRes, clientRes, telemetry, extSnapshot, meta, responseHeaders) {
   let buffer = "";
+  // Decode across chunk boundaries: a multi-byte UTF-8 char split between two
+  // network chunks must not be decoded per-chunk (that yields U+FFFD).
+  const decoder = new StringDecoder("utf8");
 
   for await (const chunk of upstreamRes) {
-    const text = chunk.toString();
+    const text = typeof chunk === "string" ? chunk : decoder.write(chunk);
     buffer += text;
 
     const lines = buffer.split("\n");
@@ -101,6 +105,7 @@ export async function streamResponse(upstreamRes, clientRes, telemetry, extSnaps
     }
   }
 
+  buffer += decoder.end();
   if (buffer.length > 0) {
     await processLine(buffer, clientRes, telemetry, extSnapshot, meta, responseHeaders);
   }
